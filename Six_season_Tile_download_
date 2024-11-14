@@ -1,0 +1,158 @@
+var N23E92 = ee.Geometry.Polygon(
+        [[[92, 24],
+          [93, 24],
+          [93, 23],
+          [92, 23],
+          [92, 24]]])   
+
+var roi = N23E92;
+//Map.addLayer(roi, {color: '000000'},  "roi" , 0)
+
+Map.addLayer(roi, {color: '000000'},  "Grid" )
+Map.centerObject(roi, 9);
+
+var start = ee.Date('2016-01-01');
+var finish = ee.Date('2024-03-31');
+
+var s2Clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY');
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+    .filterDate(start, finish)
+    .filterBounds(roi);
+
+var MAX_CLOUD_PROBABILITY = 65;
+
+function maskClouds(img) {
+  var clouds = ee.Image(img.get('cloud_mask')).select('probability');
+  var isNotCloud = clouds.lt(MAX_CLOUD_PROBABILITY);
+  return img.updateMask(isNotCloud).clip(roi);  // Clip to the roi here
+}
+
+// The masks for the 10m bands sometimes do not exclude bad data at
+// scene edges, so we apply masks from the 20m and 60m bands as well.
+// Example asset that needs this operation:
+// COPERNICUS/S2_CLOUD_PROBABILITY/20190301T000239_20190301T000238_T55GDP
+function maskEdges(s2_img) {
+  return s2_img.updateMask(
+      s2_img.select('B8A').mask().updateMask(s2_img.select('B9').mask()));
+}
+
+var fdatelist_2M = ['-01-01','-03-01','-05-01','-07-01','-09-01','-11-01'];
+var ldatelist_2M = ['-02-28','-04-30','-06-30','-08-31','-10-31','-12-31'];
+var fdatelist_4M = ['-12-01','-02-01','-04-01','-06-01','-08-01','-10-01'];
+var ldatelist_4M = ['-03-31','-05-31','-07-31','-09-30','-11-30','-01-31'];
+
+
+function getComposite(startDate, endDate) {
+  var criteria = ee.Filter.and(
+    ee.Filter.bounds(roi), ee.Filter.date(startDate, endDate));
+  var S2_filtered = s2.filter(criteria).map(maskEdges);
+  var S2Clouds_filtered = s2Clouds.filter(criteria);
+  
+  var S2WithCloudMask = ee.Join.saveFirst('cloud_mask').apply({
+    primary: S2_filtered,
+    secondary: S2Clouds_filtered,
+    condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+  });
+  return ee.ImageCollection(S2WithCloudMask).map(maskClouds).map(maskEdges).median().clip(roi);
+}
+
+function createMosaic(images) {
+  return ee.ImageCollection.fromImages(images).mosaic();
+}
+
+// List to store all the seasonal images
+var seasonalImages = [];
+
+for (var yr = 2023; yr < 2024; yr++) {
+  for (var i = 0, len = fdatelist_2M.length; i < len; i++) {
+    var fdate_2M = yr.toString() + fdatelist_2M[i];
+    var ldate_2M = yr.toString() + ldatelist_2M[i];
+    var fdate_4M = yr.toString() + fdatelist_4M[i];
+    var ldate_4M = yr.toString() + ldatelist_4M[i];
+    if (i === 0) {
+      fdate_4M = (yr - 1).toString() + fdatelist_4M[i];
+    }
+    if (i === 5) {
+      ldate_4M = (yr + 1).toString() + ldatelist_4M[i];
+    }
+    var fdate_2M_1Yago = (yr - 1).toString() + fdatelist_2M[i];
+    var ldate_2M_1Yago = (yr - 1).toString() + ldatelist_2M[i];
+    
+    var criteria_2M = ee.Filter.and(
+      ee.Filter.bounds(roi), ee.Filter.date(fdate_2M, ldate_2M));
+    var criteria_4M = ee.Filter.and(
+      ee.Filter.bounds(roi), ee.Filter.date(fdate_4M, ldate_4M));
+    var criteria_2M_1Yago = ee.Filter.and(
+      ee.Filter.bounds(roi), ee.Filter.date(fdate_2M_1Yago, ldate_2M_1Yago));
+    
+    var s2_filtered_2M = s2.filter(criteria_2M).map(maskEdges);
+    var s2_filtered_4M = s2.filter(criteria_4M).map(maskEdges);
+    var s2_filtered_2M_1Yago = s2.filter(criteria_2M_1Yago).map(maskEdges);
+    var s2Clouds_filtered_2M = s2Clouds.filter(criteria_2M);
+    var s2Clouds_filtered_4M = s2Clouds.filter(criteria_4M);
+    var s2Clouds_filtered_2M_1Yago = s2Clouds.filter(criteria_2M_1Yago);
+    
+    var s2SrWithCloudMask_2M = ee.Join.saveFirst('cloud_mask').apply({
+      primary: s2_filtered_2M,
+      secondary: s2Clouds_filtered_2M,
+      condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+    });
+    var s2SrWithCloudMask_4M = ee.Join.saveFirst('cloud_mask').apply({
+      primary: s2_filtered_4M,
+      secondary: s2Clouds_filtered_4M,
+      condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+    });
+    var s2SrWithCloudMask_2M_1Yago = ee.Join.saveFirst('cloud_mask').apply({
+      primary: s2_filtered_2M_1Yago,
+      secondary: s2Clouds_filtered_2M_1Yago,
+      condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+    });
+    
+    var weighted_image_collection = s2SrWithCloudMask_2M.merge(s2SrWithCloudMask_2M).merge(s2SrWithCloudMask_4M).merge(s2SrWithCloudMask_2M_1Yago);
+    
+    var s2CloudMasked_2M = ee.ImageCollection(s2SrWithCloudMask_2M).map(maskClouds).median().clip(roi); // Clip to roi
+    var s2CloudMasked_4M = ee.ImageCollection(s2SrWithCloudMask_4M).map(maskClouds).median().clip(roi); // Clip to roi
+    var s2CloudMasked_2M_1yago = ee.ImageCollection(s2SrWithCloudMask_2M_1Yago).map(maskClouds).median().clip(roi); // Clip to roi
+    var s2CloudMasked_2M_weighted = ee.ImageCollection(weighted_image_collection).map(maskClouds).median().clip(roi); // Clip to roi
+    
+    ////////////////// changes as per mijuno script  ////////////////////
+    
+    var composite_S2 = s2CloudMasked_2M_weighted;
+    var composite_S2_1Yago = getComposite(fdate_2M, ldate_2M);
+    
+    // Create mosaics
+    var composite_S2_mosaic_2Y_bef = createMosaic([composite_S2_1Yago, composite_S2]);
+    
+    var visParams = {min: 0, max: 2000, bands: ['B8', 'B4', 'B3']};
+   
+    //Map.addLayer(composite_S2_mosaic_2Y_bef, visParams, 'Sentinel-2_' + fdate_2M + '_' + ldate_2M + '_1Y_bef_mosaic');
+
+
+    var rgbVis = {min: 0, max: 2000, bands: ['B8', 'B4', 'B3']};
+    
+    //Map.addLayer(s2CloudMasked_2M, rgbVis, 'S2_' + fdate_2M + '_' + ldate_2M +'_truecolor_2M_' + MAX_CLOUD_PROBABILITY + '%', 0);
+    /*
+    Map.addLayer(
+        s2CloudMasked_4M, rgbVis, 'S2_' + fdate_4M + '_' + ldate_4M +'_truecolor_4M_' + MAX_CLOUD_PROBABILITY + '%');
+    Map.addLayer(
+        s2CloudMasked_2M_1Yago, rgbVis, 'S2_' + fdate_2M_1Yago + '_' + ldate_2M_1Yago +'_truecolor_2M_1Yago_' + MAX_CLOUD_PROBABILITY + '%');
+    */
+    Map.addLayer(s2CloudMasked_2M_weighted, rgbVis, 'S2_' + fdate_2M + '_' + ldate_2M +'_truecolor_2M_weighted' + MAX_CLOUD_PROBABILITY + '%', 0 );
+  
+  
+   var selectedBands = ['B2', 'B3', 'B4', 'B8'];
+    //var selectedBands = ['B5', 'B6', 'B7', 'B8A','B11','B12'];
+    Export.image.toDrive({
+      image: s2CloudMasked_2M_weighted.select(selectedBands).toInt16(),     // .toInt16() change the data type from float to integer which is reduce the size of the data
+      description: 'Sentinel2_Mosaic_' + fdate_2M + '_' + ldate_2M,
+      folder: 'EarthEngineImages',
+      //fileNamePrefix: 'N37E141_model',
+      fileNamePrefix: 'N39E139_S2_' + fdate_2M + '_10m',
+      region: roi,
+      scale: 10,
+      maxPixels: 1e13,
+      crs: 'EPSG:4326'})
+ 
+  }
+}
+
