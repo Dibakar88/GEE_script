@@ -1,0 +1,39 @@
+// Define your individual FeatureCollections
+var Water = ee.FeatureCollection([
+    ee.Feature(ee.Geometry.Point([91.01175500891529, 24.05414958456226]), {"LC": 0}),
+    ee.Feature(ee.Geometry.Point([90.99939538977466, 24.13563597695577]), {"LC": 0})
+]);
+
+var Vegetation = ee.FeatureCollection([
+    ee.Feature(ee.Geometry.Point([92.2328241293942, 24.604022915585176]), {"LC": 1})
+]);
+
+var BareSoil = ee.FeatureCollection([
+    ee.Feature(ee.Geometry.Point([91.0438158986139, 24.408562859314003]), {"LC": 2})
+]);
+
+// Merge the FeatureCollections into one
+var allPoints = Water.merge(Vegetation).merge(BareSoil);
+
+// Add coordinates as properties
+var pointsWithCoords = allPoints.map(function(feature) {
+  var coords = feature.geometry().coordinates();
+  return feature.set({
+    longitude: coords.get(0),
+    latitude: coords.get(1)
+  });
+});
+
+// Select the properties to export
+var exportData = pointsWithCoords.select(['longitude', 'latitude', 'LC']);
+
+// Export as CSV to Google Drive
+Export.table.toDrive({
+  collection: exportData,
+  description: 'export_points_with_classification',
+  fileFormat: 'CSV'
+});
+
+
+
+
