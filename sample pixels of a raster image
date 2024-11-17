@@ -1,0 +1,17 @@
+/Bellow is Java script to randomly sample pixels of a raster image and export the latitude and longitude of sampled pixels to csv file.
+//Adding latitude and longitude as bands in the target image
+var ImgWithCoordinate = Target_Img.selfMask().addBands(ee.Image.pixelLonLat());
+// sampling and export
+var samples = ImgWithCoordinate.sample({
+    numPixels: 100000,       // Change this number depend on your disire
+    region: geometry, //You need to provide geometry for your area of interest
+    scale: 10,
+    // geometries:true,
+    seed: 1000
+  });
+// Export the sampled pixels to driver as csv file
+Export.table.toDrive({
+  collection: samples,
+  description:'Samples',
+  fileFormat: 'CSV'
+});
