@@ -1,0 +1,756 @@
+// processing sentinel1-GRD image
+// author: Thinh (source: Google earth engine), date: 2022/06/01
+// source code: https://mdpi-res.com/d_attachment/remotesensing/remotesensing-09-01315/article_deploy/remotesensing-09-01315-s001.pdf?version=1513272340
+
+// function to mask out outlier value
+function maskOutlier(image) {
+        var edge = image.lt(-30.0);
+        var maskedImage = image.mask().and(edge.not());
+        return image.updateMask(maskedImage);
+        }
+
+// Function to mask out edges of images using angle (mask out angles <= 30 and >= 45)
+function maskAngGT30LT45(image) {
+    var ang = image.select(['angle']);
+    return image.updateMask(ang.gt(30).and(ang.lt(45)));
+}
+
+// Function to filter out windy days using climate forecasts
+function filtwinday(image){
+  var d = image.date().format('Y-M-d');
+  var wx = ee.ImageCollection('NOAA/CFSV2/FOR6H')
+    .filterDate(d);
+  var vWind = wx.select(['v-component_of_wind_height_above_ground']);
+  var a = vWind.max();
+  var uWind = wx.select(['u-component_of_wind_height_above_ground']);
+  var b = uWind.max();
+  a = a.pow(2);
+  b = b.pow(2);
+  var ab = a.add(b);
+  var ws = ab.sqrt();
+  ws = ws.multiply(3.6);
+  return image.updateMask(ws.lt(12));
+}
+
+// Function to perform angle correction (convert to gamma0)
+function toGamma0(image) {
+    var vv = image.select('VV').subtract(image.select('angle')
+    .multiply(Math.PI/180.0).cos().log10().multiply(10.0));
+    return vv.addBands(image.select('VH').subtract(image.select('angle')
+    .multiply(Math.PI/180.0).cos().log10().multiply(10.0)));
+}
+
+function toNatural_new(image) {
+    var VH = ee.Image(10).pow(image.select('VH').divide(10));
+    return VH.addBands(ee.Image(10).pow(image.select('VV').divide(10)));
+}
+function scale(image) {
+  var VH = image.select('VH').multiply(10000);
+  return VH.addBands(image.select('VV').multiply(10000));
+}
+// Function to add band containing difference between VV and VH
+function addDiff(image) {
+  return image.addBands(image.expression(
+    '(VV - VH)', {
+    'VV': image.select(['VV']),
+    'VH': image.select(['VH'])}
+    ));
+}
+
+// Function to add quotient band VV/VH 
+function addQuot(image) {
+  return image.addBands(image.expression(
+    '(VV / VH)', {
+    'VV': image.select(['VV']),
+    'VH': image.select(['VH'])}
+    ));
+}
+
+// Function to apply boxcar filter. boxcar 3x3 filter
+function fltr(image) {
+  var boxcar = ee.Kernel.circle({radius: 3, units: 'pixels', normalize: true});
+  return image.convolve(boxcar);
+}
+
+// Function to convert to natural value
+function toNatural(img) {
+  return ee.Image(10.0).pow(img.select(0).divide(10.0));
+}
+
+// Function to convert to db value
+function toDB(img) {
+  return ee.Image(img).log10().multiply(10.0);
+}
+
+// function to join two image collection
+function indexJoin(collectionA, collectionB, propertyName) {
+  var joined = ee.ImageCollection(ee.Join.saveFirst(propertyName).apply({
+    primary: collectionA,
+    secondary: collectionB,
+    condition: ee.Filter.equals({
+      leftField: 'system:index',
+      rightField: 'system:index'})
+  }));
+  
+  
+  // Merge the bands of the joined image.
+  return joined.map(function(image) {
+    return image.addBands(ee.Image(image.get(propertyName)));
+  });
+}
+
+//----------------------------start of Sigma Lee Filtering fucntion-------------------------//
+// Function for RL speckle filter from https://code.earthengine.google.com/2ef38463ebaf5ae133a478f173fd0ab5
+// by Guido Lemoine
+function RefinedLee(img) {
+  // img must be in natural units, i.e. not in dB!
+  // Set up 3x3 kernels
+  var weights3 = ee.List.repeat(ee.List.repeat(1,3),3);
+  var kernel3 = ee.Kernel.fixed(3,3, weights3, 1, 1, false);
+  var mean3 = img.reduceNeighborhood(ee.Reducer.mean(), kernel3);
+  var variance3 = img.reduceNeighborhood(ee.Reducer.variance(), kernel3);
+  // Use a sample of the 3x3 windows inside a 7x7 windows to determine gradients
+  // and directions
+  var sample_weights = ee.List([[0,0,0,0,0,0,0], [0,1,0,1,0,1,0],
+    [0,0,0,0,0,0,0], [0,1,0,1,0,1,0], [0,0,0,0,0,0,0], [0,1,0,1,0,1,0],
+    [0,0,0,0,0,0,0]]);
+  var sample_kernel = ee.Kernel.fixed(7,7, sample_weights, 3,3, false);
+  // Calculate mean and variance for the sampled windows and store as 9 bands
+  var sample_mean = mean3.neighborhoodToBands(sample_kernel);
+  var sample_var = variance3.neighborhoodToBands(sample_kernel);
+  // Determine the 4 gradients for the sampled windows
+  var gradients = sample_mean.select(1).subtract(sample_mean.select(7)).abs();
+  gradients = gradients.addBands(sample_mean.select(6).subtract(sample_mean
+  .select(2)).abs());
+  gradients = gradients.addBands(sample_mean.select(3).subtract(sample_mean
+  .select(5)).abs());
+  gradients = gradients.addBands(sample_mean.select(0).subtract(sample_mean
+  .select(8)).abs());
+  
+  // And find the maximum gradient amongst gradient bands
+  var max_gradient = gradients.reduce(ee.Reducer.max());
+  
+  // Create a mask for band pixels that are the maximum gradient
+  var gradmask = gradients.eq(max_gradient);
+
+  // duplicate gradmask bands: each gradient represents 2 directions
+  gradmask = gradmask.addBands(gradmask);
+  // Determine the 8 directions
+  var directions = sample_mean.select(1).subtract(sample_mean.select(4))
+    .gt(sample_mean.select(4).subtract(sample_mean.select(7))).multiply(1);
+  directions = directions.addBands(sample_mean.select(6).subtract(sample_mean
+    .select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(2)))
+    .multiply(2));
+  directions = directions.addBands(sample_mean.select(3).subtract(sample_mean
+    .select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(5)))
+    .multiply(3));
+  directions = directions.addBands(sample_mean.select(0).subtract(sample_mean
+    .select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(8)))
+    .multiply(4));
+  // The next 4 are the not() of the previous 4
+  directions = directions.addBands(directions.select(0).not().multiply(5));
+  directions = directions.addBands(directions.select(1).not().multiply(6));
+  directions = directions.addBands(directions.select(2).not().multiply(7));
+  directions = directions.addBands(directions.select(3).not().multiply(8));
+  
+  // Mask all values that are not 1-8
+  directions = directions.updateMask(gradmask);
+  
+  // "collapse" the stack into a singe band image (due to masking, each pixel
+  // has just one value (1-8) in it's directional band, and is otherwise masked)
+  directions = directions.reduce(ee.Reducer.sum());
+  
+  // Generate stats
+  var sample_stats = sample_var.divide(sample_mean.multiply(sample_mean));
+  
+  // Calculate localNoiseVariance
+  var sigmaV = sample_stats.toArray().arraySort().arraySlice(0,0,5)
+    .arrayReduce(ee.Reducer.mean(), [0]);
+  
+  // Set up the 7*7 kernels for directional statistics
+  var rect_weights = ee.List.repeat(ee.List.repeat(0,7),3)
+    .cat(ee.List.repeat(ee.List.repeat(1,7),4));
+  
+  // Set weights
+  var diag_weights = ee.List([[1,0,0,0,0,0,0], [1,1,0,0,0,0,0], [1,1,1,0,0,0,0],
+    [1,1,1,1,0,0,0], [1,1,1,1,1,0,0], [1,1,1,1,1,1,0], [1,1,1,1,1,1,1]]);
+  var rect_kernel = ee.Kernel.fixed(7,7, rect_weights, 3, 3, false);
+  var diag_kernel = ee.Kernel.fixed(7,7, diag_weights, 3, 3, false);
+  // Create stacks for mean and variance using the original kernels.
+  // Mask with relevant direction.
+  var dir_mean = img.reduceNeighborhood(ee.Reducer.mean(), rect_kernel)
+    .updateMask(directions.eq(1));
+  var dir_var = img.reduceNeighborhood(ee.Reducer.variance(), rect_kernel)
+    .updateMask(directions.eq(1));
+  dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(),
+    diag_kernel).updateMask(directions.eq(2)));
+  dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(),
+    diag_kernel).updateMask(directions.eq(2)));
+  // and add the bands for rotated kernels
+  for (var i=1; i<4; i++) {
+    dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(),
+      rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+    dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(),
+      rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+    dir_mean = dir_mean.addBands(img.reduceNeighborhood(ee.Reducer.mean(),
+      diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+    dir_var = dir_var.addBands(img.reduceNeighborhood(ee.Reducer.variance(),
+      diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+  }
+  // "collapse" the stack into a single band image (due to masking, each pixel
+  // has just one value in it's directional band, and is otherwise masked)
+  dir_mean = dir_mean.reduce(ee.Reducer.sum());
+  dir_var = dir_var.reduce(ee.Reducer.sum());
+  // A finally generate the filtered value
+  var varX = dir_var.subtract(dir_mean.multiply(dir_mean).multiply(sigmaV))
+  .divide(sigmaV.add(1.0));
+  var b = varX.divide(dir_var);
+  var result = dir_mean.add(b.multiply(img.subtract(dir_mean)));
+  return(result.arrayFlatten([['sum']]));
+}
+//----------------------------End Sigma Lee Filtering fucntion-------------------------//
+
+// function to create 100 sub regions from a large image
+function sub_region(aoi)
+{
+  var listCoords = ee.Array.cat(aoi.coordinates(), 1);
+  var xCoords = listCoords.slice(1, 0, 1);
+  var yCoords = listCoords.slice(1, 1, 2);
+  var xMin = xCoords.reduce('min', [0]).get([0,0]);
+  var xMax = xCoords.reduce('max', [0]).get([0,0]);
+  var yMin = yCoords.reduce('min', [0]).get([0,0]);
+  var yMax = yCoords.reduce('max', [0]).get([0,0]);
+  var xlist = ee.List([xMin, xMin.add(0.1), xMin.add(0.2), xMin.add(0.3), xMin.add(0.4), xMin.add(0.5), xMin.add(0.6), xMin.add(0.7), xMin.add(0.8), xMin.add(0.9)]);
+  var ylist = ee.List([yMin, yMin.add(0.1), yMin.add(0.2), yMin.add(0.3), yMin.add(0.4), yMin.add(0.5), yMin.add(0.6), yMin.add(0.7), yMin.add(0.8), yMin.add(0.9)]);
+  // var ylist = ee.List([yMin, yMin.add(0.25), yMin.add(0.5), yMin.add(0.75)]);
+  
+  var geometry_list = ee.List([]);
+  var seq = ee.List.sequence(0,9);
+  
+  var iter_function = function(lat, list){
+    var geometry_0 = ee.Geometry.Polygon(
+        [[[xlist.get(0), ylist.get(lat)],
+        [ee.Number(xlist.get(0)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(0)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(0)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(0)), ee.Number(ylist.get(lat))]]], null, false);
+  
+    var geometry_1 = ee.Geometry.Polygon(
+        [[[xlist.get(1), ylist.get(lat)],
+        [ee.Number(xlist.get(1)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(1)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(1)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(1)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_2 = ee.Geometry.Polygon(
+        [[[xlist.get(2), ylist.get(lat)],
+        [ee.Number(xlist.get(2)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(2)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(2)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(2)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_3 = ee.Geometry.Polygon(
+        [[[xlist.get(3), ylist.get(lat)],
+        [ee.Number(xlist.get(3)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(3)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(3)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(3)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_4 = ee.Geometry.Polygon(
+        [[[xlist.get(4), ylist.get(lat)],
+        [ee.Number(xlist.get(4)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(4)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(4)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(4)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_5 = ee.Geometry.Polygon(
+        [[[xlist.get(5), ylist.get(lat)],
+        [ee.Number(xlist.get(5)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(5)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(5)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(5)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_6 = ee.Geometry.Polygon(
+        [[[xlist.get(6), ylist.get(lat)],
+        [ee.Number(xlist.get(6)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(6)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(6)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(6)), ee.Number(ylist.get(lat))]]], null, false);
+    
+    var geometry_7 = ee.Geometry.Polygon(
+        [[[xlist.get(7), ylist.get(lat)],
+        [ee.Number(xlist.get(7)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(7)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(7)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(7)), ee.Number(ylist.get(lat))]]], null, false);
+    var geometry_8 = ee.Geometry.Polygon(
+        [[[xlist.get(8), ylist.get(lat)],
+        [ee.Number(xlist.get(8)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(8)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(8)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(8)), ee.Number(ylist.get(lat))]]], null, false);
+    var geometry_9 = ee.Geometry.Polygon(
+        [[[xlist.get(9), ylist.get(lat)],
+        [ee.Number(xlist.get(9)).add(0.1), ee.Number(ylist.get(lat))],
+        [ee.Number(xlist.get(9)).add(0.1), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(9)), ee.Number(ylist.get(lat)).add(0.1)],
+        [ee.Number(xlist.get(9)), ee.Number(ylist.get(lat))]]], null, false);
+    return ee.List(list).add([geometry_0, geometry_1, geometry_2, geometry_3, geometry_4, geometry_5, geometry_6, geometry_7, geometry_8, geometry_9]);
+  };
+  geometry_list = seq.iterate(iter_function, geometry_list);
+  geometry_list = ee.List(geometry_list).flatten();
+  return geometry_list;
+}
+
+// function to get list of min and max value of a image band (list[0]= min, list[1]=max)
+function minMax(imgBand, geometry)
+{
+  var bandname = imgBand.bandNames();
+  var minMaxDict = imgBand.reduceRegion({
+      reducer: ee.Reducer.minMax(),
+      geometry: geometry,
+      scale: 20,
+      maxPixels: 1e30});
+  var min = minMaxDict.get(ee.String(bandname.get(0)).cat("_min"));
+  // var max = minMaxDict.get(ee.String(bandname.get(0)).cat("_max"));
+  // return ee.List([min, max]);
+  return min;
+}
+//------------------------------RTC slope correction--------------------------//
+// https://github.com/ESA-PhiLab/radiometric-slope-correction/blob/master/javascript/slope_correction_module.js
+// correction function for radiometric slope correction on a
+// Sentinel-1 image collection
+var slope_correction = function (collection,
+                                 options
+                                 ){
+
+    // set defaults if undefined options
+    options = options || {};
+    var model = options.model || 'volume';
+    var elevation = options.elevation || ee.Image('USGS/SRTMGL1_003');
+    var buffer = options.buffer || 0;
+
+    // we need a 90 degree in radians image for a couple of calculations
+    var ninetyRad = ee.Image.constant(90).multiply(Math.PI/180);
+
+    // Volumetric Model Hoekman 1990
+    function _volume_model(theta_iRad, alpha_rRad){
+
+      var nominator = (ninetyRad.subtract(theta_iRad).add(alpha_rRad)).tan();
+      var denominator = (ninetyRad.subtract(theta_iRad)).tan();
+      return nominator.divide(denominator);
+    }
+
+    // surface model Ulander et al. 1996
+    function _surface_model(theta_iRad, alpha_rRad, alpha_azRad){
+
+      var nominator = (ninetyRad.subtract(theta_iRad)).cos();
+      var denominator = alpha_azRad.cos()
+        .multiply((ninetyRad.subtract(theta_iRad).add(alpha_rRad)).cos());
+      return nominator.divide(denominator);
+    }
+
+    // buffer function (thanks Noel)
+    function _erode(img, distance) {
+
+      var d = (img.not().unmask(1)
+          .fastDistanceTransform(30).sqrt()
+          .multiply(ee.Image.pixelArea().sqrt()));
+
+      return img.updateMask(d.gt(distance));
+    }
+
+    // calculate masks
+    function _masking(alpha_rRad, theta_iRad, proj, buffer){
+
+        // layover, where slope > radar viewing angle
+        var layover = alpha_rRad.lt(theta_iRad).rename('layover');
+
+        // shadow
+        var shadow = alpha_rRad.gt(ee.Image.constant(-1).multiply(ninetyRad.subtract(theta_iRad))).rename('shadow');
+
+        // combine layover and shadow
+        var mask = layover.and(shadow);
+
+        // add buffer to final mask
+        if (buffer > 0)
+            mask = _erode(mask, buffer);
+
+        return mask.rename('no_data_mask');
+   }
+
+    function _correct(image){
+
+        // get image geometry and projection
+        var geom = image.geometry();
+        var proj = image.select(1).projection();
+
+        // get look direction angle
+        var heading = (ee.Terrain.aspect(
+            image.select('angle')).reduceRegion(ee.Reducer.mean(), geom, 1000).get('aspect')
+            );
+
+        // Sigma0 to Power of input image
+        var sigma0Pow = ee.Image.constant(10).pow(image.divide(10.0));
+
+        // Radar geometry
+        var theta_iRad = image.select('angle').multiply(Math.PI/180).clip(geom);
+        var phi_iRad = ee.Image.constant(heading).multiply(Math.PI/180);
+
+        // Terrain geometry
+        var alpha_sRad = ee.Terrain.slope(elevation).select('slope')
+            .multiply(Math.PI/180).setDefaultProjection(proj).clip(geom);
+        var phi_sRad = ee.Terrain.aspect(elevation).select('aspect')
+            .multiply(Math.PI/180).setDefaultProjection(proj).clip(geom);
+
+        // Model geometry
+
+        //reduce to 3 angle
+        var phi_rRad = phi_iRad.subtract(phi_sRad);
+
+        // slope steepness in range
+        var alpha_rRad = (alpha_sRad.tan().multiply(phi_rRad.cos())).atan();
+
+        // slope steepness in azimuth
+        var alpha_azRad = (alpha_sRad.tan().multiply(phi_rRad.sin())).atan();
+
+        // Gamma_nought
+        var gamma0 = sigma0Pow .divide(theta_iRad.cos());
+
+               // models
+        if (model == 'volume')
+          var corrModel = _volume_model(theta_iRad, alpha_rRad);
+
+        if (model == 'surface')
+          var corrModel = _surface_model(theta_iRad, alpha_rRad, alpha_azRad);
+
+        if (model == 'direct')
+          var corrModel = _direct_model(theta_iRad, alpha_rRad, alpha_azRad);
+
+        // apply model to derive gamma0_flat
+        var gamma0_flat = gamma0.divide(corrModel);
+
+        // transform to dB-scale
+        var gamma0_flatDB = (ee.Image.constant(10)
+            .multiply(gamma0_flat.log10()).select(['VV', 'VH'])
+            );
+
+        // get Layover/Shadow mask
+        var mask = _masking(alpha_rRad, theta_iRad, proj, buffer);
+
+        // return gamma_flat plus mask
+        return gamma0_flatDB.addBands(mask).copyProperties(image);
+
+
+    }
+
+    // run correction function and return corrected collection
+    return collection.map(_correct);
+
+};
+
+
+
+//----------------------- folowings are processing step for sentinel-1-----------------// 
+
+
+// // 2017
+// var START_DATE = ee.Date('2017-01-01');
+// var END_DATE = ee.Date('2017-12-31');
+// var start01 = ee.Date('2017-01-01');
+// var end01 = ee.Date('2017-02-28');
+// var start02 = ee.Date('2017-03-01');
+// var end02 = ee.Date('2017-04-30');
+// var start03 = ee.Date('2017-05-01');
+// var end03 = ee.Date('2017-06-30');
+// var start04 = ee.Date('2017-07-01');
+// var end04 = ee.Date('2017-08-31');
+// var start05 = ee.Date('2017-09-01');
+// var end05 = ee.Date('2017-10-31');
+// var start06 = ee.Date('2017-11-01');
+// var end06 = ee.Date('2017-12-31');
+
+// // 2018
+// var START_DATE = ee.Date('2018-01-01');
+// var END_DATE = ee.Date('2018-12-31');
+// var start01 = ee.Date('2018-01-01');
+// var end01 = ee.Date('2018-02-28');
+// var start02 = ee.Date('2018-03-01');
+// var end02 = ee.Date('2018-04-30');
+// var start03 = ee.Date('2018-05-01');
+// var end03 = ee.Date('2018-06-30');
+// var start04 = ee.Date('2018-07-01');
+// var end04 = ee.Date('2018-08-31');
+// var start05 = ee.Date('2018-09-01');
+// var end05 = ee.Date('2018-10-31');
+// var start06 = ee.Date('2018-11-01');
+// var end06 = ee.Date('2018-12-31');
+
+// // 2019
+// var START_DATE = ee.Date('2019-01-01');
+// var END_DATE = ee.Date('2019-12-31');
+// var start01 = ee.Date('2019-01-01');
+// var end01 = ee.Date('2019-02-28');
+// var start02 = ee.Date('2019-03-01');
+// var end02 = ee.Date('2019-04-30');
+// var start03 = ee.Date('2019-05-01');
+// var end03 = ee.Date('2019-06-30');
+// var start04 = ee.Date('2019-07-01');
+// var end04 = ee.Date('2019-08-31');
+// var start05 = ee.Date('2019-09-01');
+// var end05 = ee.Date('2019-10-31');
+// var start06 = ee.Date('2019-11-01');
+// var end06 = ee.Date('2019-12-31');
+// 2020
+//var START_DATE = ee.Date('2020-01-01');
+//var END_DATE = ee.Date('2020-12-31');
+//var start01 = ee.Date('2020-01-01');
+//var end01 = ee.Date('2020-02-29');
+//var start02 = ee.Date('2020-03-01');
+//var end02 = ee.Date('2020-04-30');
+//var start03 = ee.Date('2020-05-01');
+//var end03 = ee.Date('2020-06-30');
+//var start04 = ee.Date('2020-07-01');
+//var end04 = ee.Date('2020-08-31');
+//var start05 = ee.Date('2020-09-01');
+//var end05 = ee.Date('2020-10-31');
+//var start06 = ee.Date('2020-11-01');
+//var end06 = ee.Date('2020-12-31');
+// // 2021
+// var START_DATE = ee.Date('2021-01-01');
+// var END_DATE = ee.Date('2021-12-31');
+// var start01 = ee.Date('2021-01-01');
+// var end01 = ee.Date('2021-02-28');
+// var start02 = ee.Date('2021-03-01');
+// var end02 = ee.Date('2021-04-30');
+// var start03 = ee.Date('2021-05-01');
+// var end03 = ee.Date('2021-06-30');
+// var start04 = ee.Date('2021-07-01');
+// var end04 = ee.Date('2021-08-31');
+// var start05 = ee.Date('2021-09-01');
+// var end05 = ee.Date('2021-10-31');
+// var start06 = ee.Date('2021-11-01');
+// var end06 = ee.Date('2021-12-31');
+// // 2022
+// var START_DATE = ee.Date('2022-01-01');
+// var END_DATE = ee.Date('2022-12-31');
+// var start01 = ee.Date('2022-01-01');
+// var end01 = ee.Date('2022-02-28');
+// var start02 = ee.Date('2022-03-01');
+// var end02 = ee.Date('2022-04-30');
+// var start03 = ee.Date('2022-05-01');
+// var end03 = ee.Date('2022-06-30');
+// var start04 = ee.Date('2022-07-01');
+// var end04 = ee.Date('2022-08-31');
+// var start05 = ee.Date('2022-09-01');
+// var end05 = ee.Date('2022-10-31');
+// var start06 = ee.Date('2022-11-01');
+// var end06 = ee.Date('2022-12-31');
+
+// // 2023
+var START_DATE = ee.Date('2023-01-01');
+var END_DATE = ee.Date('2023-12-31');
+var start01 = ee.Date('2023-01-01');
+var end01 = ee.Date('2023-02-28');
+var start02 = ee.Date('2023-03-01');
+var end02 = ee.Date('2023-04-30');
+var start03 = ee.Date('2023-05-01');
+var end03 = ee.Date('2023-06-30');
+var start04 = ee.Date('2023-07-01');
+var end04 = ee.Date('2023-08-31');
+var start05 = ee.Date('2023-09-01');
+var end05 = ee.Date('2023-10-31');
+var start06 = ee.Date('2023-11-01');
+var end06 = ee.Date('2023-12-31');
+// define aoi
+var aoi = [N20E92,N21E89,N21E90,N21E91,N21E92,N22E88,N22E89,N22E90,N22E91,
+           N22E92,N23E88,N23E89,N23E90,N23E91,N23E92,N24E88,N24E89,N24E90,
+           N24E91,N24E92,N25E88,N25E89,N25E90,N25E91,N25E92,N26E88,N26E89];
+
+// define list of tile
+var tile = ["N20E92", "N21E89", "N21E90", "N21E91", "N21E92", "N22E88", "N22E89", "N22E90", "N22E91", 
+            "N22E92", "N23E88", "N23E89", "N23E90", "N23E91", "N23E92", "N24E88", "N24E89", "N24E90", 
+            "N24E91", "N24E92", "N25E88", "N25E89", "N25E90", "N25E91", "N25E92", "N26E88", "N26E89" ]
+// list of period
+// var season_start = [start03, start06, start09, start12];
+// var season_end = [end03, end06, end09, end12];
+
+//list of 12 season
+var season_start = [start01, start02, start03, start04, start05, start06];
+var season_end = [end01, end02, end03, end04, end05, end06];
+
+// name of season
+// var season03 = '_S1_03-01_';
+// var season06 = '_S1_06-01_';
+// var season09 = '_S1_09-01_';
+// var season12 = '_S1_12-01_';
+// var season_name = [season03, season06, season09, season12];
+
+//name of 6 season
+var season01 = '_S1_01-01_';
+var season02 = '_S1_03-01_';
+var season03 = '_S1_05-01_';
+var season04 = '_S1_07-01_';
+var season05 = '_S1_09-01_';
+var season06 = '_S1_11-01_';
+
+var season_name = [season01, season02, season03, season04, season05, season06];
+
+
+//var slope_lib = require('this needs to point to slope_correction_module.js');
+// or use the author ones
+// var slope_lib = require('https://github.com/ESA-PhiLab/radiometric-slope-correction/tree/master/javascript/slope_correction_module.js');
+
+for (var i=0; i<1; i++) // i from 0 to 61
+{
+  var s1GRD = ee.ImageCollection('COPERNICUS/S1_GRD')
+            .filterBounds(aoi[i])
+            .filter(ee.Filter.eq('instrumentMode', 'IW'))
+            .filterMetadata('transmitterReceiverPolarisation', 'equals', ['VV', 'VH'])
+            .filterMetadata('resolution_meters', 'equals', 10)
+            .filterDate(START_DATE, END_DATE);
+            // .map(maskOutlier);
+  
+  // // mask out value at angle <=30 degree and angle >= 45 degree (using "angle" band) 
+  // var s1AngleMask = s1GRD.map(maskAngGT30LT45);
+  // // print("anglemask", s1AngleMask);
+  
+  // // filter windy days
+  // var s1FiltWinDay = s1AngleMask.map(filtwinday);
+  // // print("s1FiltWinDay", s1FiltWinDay);
+  
+  for (var j=0; j<=5; j++) //j from 0 to 3
+  {
+    // select image collection
+    var s1season = s1GRD.filterDate(season_start[j], season_end[j]);
+    
+    //select bands
+    var s1VV = s1season.select('VV');
+    var s1VH = s1season.select('VH');
+    var s1Angle = s1season.select('angle');
+    
+    
+    // convert to natual value
+    var s1VVto10 = s1VV.map(toNatural);
+    var s1VHto10 = s1VH.map(toNatural);
+    // print('s1ToNatural', s1VVto10);
+    
+    // apply Refined Lee Filter
+    var s1VVLee = s1VVto10.map(RefinedLee);
+    var s1VHLee = s1VHto10.map(RefinedLee);
+    // print('s1Lee', s1VHLee);
+    
+    // convert to db
+    var s1VVDb = s1VVLee.map(toDB);
+    var s1VHDb = s1VHLee.map(toDB);
+    // print('s1VHDb', s1VHDb);
+    // print('s1VVDb', s1VVDb);
+    
+    // rename band to original name
+    s1VVDb = s1VVDb.select(['sum'], ['VV']);
+    s1VHDb = s1VHDb.select(['sum'], ['VH']);
+    
+    // join collections
+    var s1Db = indexJoin( s1VVDb, s1VHDb, 'db');
+    var s1Db = indexJoin(s1Db, s1Angle, 'full');
+    // print('s1VVVHDb', s1Db);
+    
+    //Slope corrected (https://github.com/ESA-PhiLab/radiometric-slope-correction)
+    var s1SLC = slope_correction(s1Db);
+    
+    // calculate difference band VV-VH
+    var s1addDiff = s1SLC.map(addDiff);
+    // print('s1Diff', s1addDiff);
+    
+    // calculate quotient band VV/VH
+    var s1DiffQuot = s1addDiff.map(addQuot);
+    // print('s1_4band', s1DiffQuot);
+    
+    // rename added band
+    var s1_4band = s1DiffQuot.select(['VV', 'VH', 'VV_1', 'VV_2'], ['VV', 'VH', 'Diff', 'Ratio']);
+    // print('s1_4band_rename', s1_4band);
+    // var s1_3band = s1_4band.select(['VV', 'VH', 'Diff']);
+    // var s1_ratio = s1_4band.select(['Ratio']);
+    
+    // name for each season
+    var outname_4band = tile[i].concat(season_name[j].concat("4bands"));
+    // var outname_3band = tile[i].concat(season_name[j]).concat("3bands");
+    // var outname_ratio = tile[i].concat(season_name[j]).concat("ratio");
+    
+    // create mean image of each season 
+    var s1_4band_median = s1_4band.median();
+    // var s1_3band_mean = s1_3band.mean();
+    // var s1_ratio_mean = s1_ratio.mean();
+    
+    // clip images to aoi
+    var s1_4band_clip = s1_4band_median.clip(aoi[i]);
+    // print(s1_4band_clip.select(2));
+    // var s1_3band_clip = s1_3band_mean.clip(aoi[i]);
+    // var s1_ratio_clip = s1_ratio_mean.clip(aoi[i]);
+    // print(s1_3band_clip);
+    // print(s1_ratio_clip);
+    
+    //Calculate texture bands
+    var s1_2band = s1_4band_clip.select(['VH', 'VV']);
+    
+    var s1_natural = toNatural_new(s1_2band).select(['constant', 'constant_1'],['VH', 'VV']);
+    var s1_scale = scale(s1_natural);
+  
+    var s1_texture = s1_scale.toUint16().glcmTexture().select(['VH_savg', 'VH_diss', 'VV_savg', 'VV_diss']);
+    // var s1_int = s1_texture.multiply(1000);
+    
+    var outname_4band = tile[i].concat(season_name[j].concat("4band"));
+    var outname_texture = tile[i].concat(season_name[j].concat("texture"));
+    
+    
+    // Export.image.toDrive({
+    //   image: s1_4band_clip.toFloat(),
+    //   description: outname_4band,
+    //   fileNamePrefix: outname_4band,
+    //   folder: "Sentinel1_2020",
+    //   scale: 10,
+    //   region: aoi[i],
+    //   fileFormat: 'GeoTIFF',
+    //   maxPixels: 1e13});
+      
+    Export.image.toDrive({
+      image: s1_texture,
+      description: outname_texture,
+      fileNamePrefix: outname_texture,
+      folder: "Sentinel1_2023_texture",
+      scale: 10,
+      region: aoi[i],
+      fileFormat: 'GeoTIFF',
+      maxPixels: 1e13});
+    
+      
+    // Export.image.toDrive({
+    //   image: s1VV.median().clip(aoi[i]),
+    //   description: "test",
+    //   fileNamePrefix: "test",
+    //   folder: "Sentinel2_2020",
+    //   scale: 10,
+    //   region: aoi[i],
+    //   fileFormat: 'GeoTIFF',
+    //   maxPixels: 1e13});
+      
+    // Export.image.toDrive({
+    //   image: s1_ratio_clip.toFloat(),
+    //   description: outname_ratio,
+    //   fileNamePrefix: outname_ratio,
+    //   folder: "Sentinel2_2020",
+    //   scale: 10,
+    //   region: aoi[i],
+    //   fileFormat: 'GeoTIFF',
+    //   maxPixels: 1e13});
+    
+    // // // var visParams_1 = {min:-40, max: 1, bands: ['VV', 'VH', 'Ratio']};
+    // var visParams_2 = {min:-75, max:100 , band:['VH_corr']};
+    // // // Map.setCenter(104.5, 10.5);
+    // // // Map.addLayer(s1_4band_clip, visParams_1, outname_4band);
+    // Map.addLayer(s1_int, visParams_2, outname_texture);
+  }
+}
+
+
+
