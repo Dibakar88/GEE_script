@@ -452,85 +452,8 @@ var slope_correction = function (collection,
 
 
 //----------------------- folowings are processing step for sentinel-1-----------------// 
+// add your desired year
 
-
-// // 2017
-// var START_DATE = ee.Date('2017-01-01');
-// var END_DATE = ee.Date('2017-12-31');
-// var start01 = ee.Date('2017-01-01');
-// var end01 = ee.Date('2017-02-28');
-// var start02 = ee.Date('2017-03-01');
-// var end02 = ee.Date('2017-04-30');
-// var start03 = ee.Date('2017-05-01');
-// var end03 = ee.Date('2017-06-30');
-// var start04 = ee.Date('2017-07-01');
-// var end04 = ee.Date('2017-08-31');
-// var start05 = ee.Date('2017-09-01');
-// var end05 = ee.Date('2017-10-31');
-// var start06 = ee.Date('2017-11-01');
-// var end06 = ee.Date('2017-12-31');
-
-// // 2018
-// var START_DATE = ee.Date('2018-01-01');
-// var END_DATE = ee.Date('2018-12-31');
-// var start01 = ee.Date('2018-01-01');
-// var end01 = ee.Date('2018-02-28');
-// var start02 = ee.Date('2018-03-01');
-// var end02 = ee.Date('2018-04-30');
-// var start03 = ee.Date('2018-05-01');
-// var end03 = ee.Date('2018-06-30');
-// var start04 = ee.Date('2018-07-01');
-// var end04 = ee.Date('2018-08-31');
-// var start05 = ee.Date('2018-09-01');
-// var end05 = ee.Date('2018-10-31');
-// var start06 = ee.Date('2018-11-01');
-// var end06 = ee.Date('2018-12-31');
-
-// // 2019
-// var START_DATE = ee.Date('2019-01-01');
-// var END_DATE = ee.Date('2019-12-31');
-// var start01 = ee.Date('2019-01-01');
-// var end01 = ee.Date('2019-02-28');
-// var start02 = ee.Date('2019-03-01');
-// var end02 = ee.Date('2019-04-30');
-// var start03 = ee.Date('2019-05-01');
-// var end03 = ee.Date('2019-06-30');
-// var start04 = ee.Date('2019-07-01');
-// var end04 = ee.Date('2019-08-31');
-// var start05 = ee.Date('2019-09-01');
-// var end05 = ee.Date('2019-10-31');
-// var start06 = ee.Date('2019-11-01');
-// var end06 = ee.Date('2019-12-31');
-// 2020
-//var START_DATE = ee.Date('2020-01-01');
-//var END_DATE = ee.Date('2020-12-31');
-//var start01 = ee.Date('2020-01-01');
-//var end01 = ee.Date('2020-02-29');
-//var start02 = ee.Date('2020-03-01');
-//var end02 = ee.Date('2020-04-30');
-//var start03 = ee.Date('2020-05-01');
-//var end03 = ee.Date('2020-06-30');
-//var start04 = ee.Date('2020-07-01');
-//var end04 = ee.Date('2020-08-31');
-//var start05 = ee.Date('2020-09-01');
-//var end05 = ee.Date('2020-10-31');
-//var start06 = ee.Date('2020-11-01');
-//var end06 = ee.Date('2020-12-31');
-// // 2021
-// var START_DATE = ee.Date('2021-01-01');
-// var END_DATE = ee.Date('2021-12-31');
-// var start01 = ee.Date('2021-01-01');
-// var end01 = ee.Date('2021-02-28');
-// var start02 = ee.Date('2021-03-01');
-// var end02 = ee.Date('2021-04-30');
-// var start03 = ee.Date('2021-05-01');
-// var end03 = ee.Date('2021-06-30');
-// var start04 = ee.Date('2021-07-01');
-// var end04 = ee.Date('2021-08-31');
-// var start05 = ee.Date('2021-09-01');
-// var end05 = ee.Date('2021-10-31');
-// var start06 = ee.Date('2021-11-01');
-// var end06 = ee.Date('2021-12-31');
 // // 2022
 // var START_DATE = ee.Date('2022-01-01');
 // var END_DATE = ee.Date('2022-12-31');
@@ -562,6 +485,7 @@ var start05 = ee.Date('2023-09-01');
 var end05 = ee.Date('2023-10-31');
 var start06 = ee.Date('2023-11-01');
 var end06 = ee.Date('2023-12-31');
+
 // define aoi
 var aoi = [N20E92,N21E89,N21E90,N21E91,N21E92,N22E88,N22E89,N22E90,N22E91,
            N22E92,N23E88,N23E89,N23E90,N23E91,N23E92,N24E88,N24E89,N24E90,
@@ -571,6 +495,7 @@ var aoi = [N20E92,N21E89,N21E90,N21E91,N21E92,N22E88,N22E89,N22E90,N22E91,
 var tile = ["N20E92", "N21E89", "N21E90", "N21E91", "N21E92", "N22E88", "N22E89", "N22E90", "N22E91", 
             "N22E92", "N23E88", "N23E89", "N23E90", "N23E91", "N23E92", "N24E88", "N24E89", "N24E90", 
             "N24E91", "N24E92", "N25E88", "N25E89", "N25E90", "N25E91", "N25E92", "N26E88", "N26E89" ]
+
 // list of period
 // var season_start = [start03, start06, start09, start12];
 // var season_end = [end03, end06, end09, end12];
@@ -601,7 +526,8 @@ var season_name = [season01, season02, season03, season04, season05, season06];
 // or use the author ones
 // var slope_lib = require('https://github.com/ESA-PhiLab/radiometric-slope-correction/tree/master/javascript/slope_correction_module.js');
 
-for (var i=0; i<1; i++) // i from 0 to 61
+for (var i=0; i<2; i++) // i from 0 to 61 
+// This is the most significant line. The code is run on the GEE platform. The final tiff file would be saved in the drive where the capacity is only 15GB (Free version). Therefore, only 2 or 3 tiles are good to run at a time. 
 {
   var s1GRD = ee.ImageCollection('COPERNICUS/S1_GRD')
             .filterBounds(aoi[i])
