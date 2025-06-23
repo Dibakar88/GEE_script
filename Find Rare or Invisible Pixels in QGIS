@@ -1,0 +1,30 @@
+Process in QGIS
+Step-by-Step Methods to Find Rare or Invisible Pixels
+
+✅ 1. Use the Raster Calculator to Isolate the Value
+  
+  If you know or suspect the pixel value (e.g., a rare outlier like 9999 or -0.1234):
+
+  Steps:
+
+  Go to Raster > Raster Calculator
+
+  Use an expression like:
+  "your_raster@1" = 9999
+
+  or, for float values:
+  abs("your_raster@1" - (-0.1234)) < 0.00001
+
+
+  Set an output layer name and run.
+
+✅ You will get a binary raster:
+
+1 = pixel matches the value
+
+0 = all other pixels
+
+🧠 This makes even rare pixels visible.
+
+
+  
