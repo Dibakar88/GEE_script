@@ -1,0 +1,23 @@
+Expression to Identify Change Type (What changed to what):
+
+To create a change code, use this:
+
+plaintext
+
+    ("Dhaka_div_reclass_23@1" * 100) + "reclass_LULC_Dhaka_Div_20@1"
+
+
+📘 Example:
+
+Value 604 → means class changed from 4 in 2020 to 6 in 2023
+
+
+🛠 Steps:
+Open Raster > Raster Calculator
+
+Paste either of the expressions above
+
+Set output filename, e.g., Dhaka_LULC_Change.tif
+
+Click Run
+
