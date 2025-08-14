@@ -1,0 +1,93 @@
+### The script is used to make a 0.5 X 0.5 degree tile image from a 1 X 1 degree 6-season Sentinel-2 images. The images belonged to the same tile.
+
+
+import geopandas as gpd
+from shapely.geometry import box
+import rasterio
+from rasterio.mask import mask
+import os
+
+# --- Step 1: Define the input and output paths ---
+# Define the folder containing your images
+image_folder = "/home/dibakar88/N24E90"
+# List of your six image filenames
+image_filenames = [
+    "N24E90_10m_01-01_resize.tif",
+    "N24E90_10m_03-01_resize.tif",
+    "N24E90_10m_05-01_resize.tif",
+    "N24E90_10m_07-01_resize.tif",
+    "N24E90_10m_09-01_resize.tif",
+    "N24E90_10m_11-01_resize.tif"
+]
+
+# Path to the directory where you want to save the output tiles
+output_dir = os.path.join(image_folder, "clipped_tiles")
+
+# Create the output directory if it doesn't exist
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    print(f"Created output directory: {output_dir}")
+
+# --- Step 2: Create the Polygon Grid (this is done only once) ---
+# Define the boundaries of your 1x1 degree tile
+# You should adjust these if your tile's coordinates are different.
+xmin_full = 90.0
+ymin_full = 24.0
+xmax_full = 91.0
+ymax_full = 25.0
+
+# Define the size of the new tiles
+tile_size = 0.5
+
+# Create a list to hold the polygons for the grid
+polygons = []
+for x in [xmin_full, xmin_full + tile_size]:
+    for y in [ymin_full, ymin_full + tile_size]:
+        polygons.append(box(x, y, x + tile_size, y + tile_size))
+
+# Create a GeoDataFrame from the list of polygons
+grid = gpd.GeoDataFrame({'geometry': polygons})
+# Set the CRS (assuming WGS84 for degree-based coordinates)
+grid.crs = 'EPSG:4326'
+
+print("Grid of 0.5x0.5 degree tiles created.")
+
+# --- Step 3: Loop through each input raster and clip it ---
+for filename in image_filenames:
+    input_raster = os.path.join(image_folder, filename)
+    
+    # Extract the base name of the input file (e.g., 'N24E90_10m_01-01_resize')
+    base_name = os.path.splitext(filename)[0]
+
+    # Open the current input raster
+    with rasterio.open(input_raster) as src:
+        # Iterate through each polygon in the grid GeoDataFrame
+        for idx, row in grid.iterrows():
+            # Get the geometry of the current polygon
+            geo = [row['geometry']]
+
+            # Clip the raster with the current polygon
+            out_image, out_transform = mask(src, geo, crop=True)
+            
+            # If the clipped image is empty, skip saving the file
+            if not out_image.any():
+                print(f"Skipping empty clip for {filename} and tile {idx}")
+                continue
+
+            # Update the metadata for the new clipped raster
+            out_meta = src.meta.copy()
+            out_meta.update({"driver": "GTiff",
+                             "height": out_image.shape[1],
+                             "width": out_image.shape[2],
+                             "transform": out_transform})
+
+            # Define a unique output filename for each clipped tile
+            output_file = os.path.join(output_dir, f'{base_name}_clipped_tile_{idx}.tif')
+
+            # Save the clipped raster to a new file
+            with rasterio.open(output_file, 'w', **out_meta) as dest:
+                dest.write(out_image)
+
+            print(f"Saved clipped tile {idx} for image: {filename}")
+
+print("\nProcessing complete for all input images.")
