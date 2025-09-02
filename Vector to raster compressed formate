@@ -1,0 +1,91 @@
+## === Vector to raster compressed formate === ##
+
+
+import geopandas as gpd
+import rasterio
+from rasterio.features import rasterize
+import numpy as np
+import os
+
+def vectorize_to_raster_by_attribute(
+    vector_path,
+    output_raster_path,
+    resolution,
+    class_attribute_name,
+    nodata_value=0,
+    compression="deflate"  # Added compression parameter
+):
+    """
+    Converts a vector file to a raster, with options for compression to manage file size.
+
+    Args:
+        vector_path (str): Path to the input vector file.
+        output_raster_path (str): Path for the output raster file.
+        resolution (float): The desired output raster resolution.
+        class_attribute_name (str): The name of the attribute column for class values.
+        nodata_value (int): The value for areas not covered by a feature.
+        compression (str): The compression method to use (e.g., 'deflate', 'lzw').
+    """
+    print(f"Reading vector file: {vector_path}")
+    if not os.path.exists(vector_path):
+        print(f"Error: Vector file not found at {vector_path}")
+        return
+
+    gdf = gpd.read_file(vector_path)
+
+    shapes = ((geom, value) for geom, value in zip(gdf.geometry, gdf[class_attribute_name]))
+    left, bottom, right, top = gdf.total_bounds
+    height = int(np.ceil((top - bottom) / resolution))
+    width = int(np.ceil((right - left) / resolution))
+    new_transform = rasterio.transform.from_origin(left, top, resolution, resolution)
+
+    print("Rasterizing vector data by attribute...")
+    raster_data = rasterize(
+        shapes=shapes,
+        out_shape=(height, width),
+        transform=new_transform,
+        fill=nodata_value,
+        all_touched=True,
+        dtype=np.uint8
+    )
+
+    print(f"Saving compressed raster file to: {output_raster_path}")
+    with rasterio.open(
+        output_raster_path,
+        'w',
+        driver='GTiff',
+        height=height,
+        width=width,
+        count=1,
+        dtype=raster_data.dtype,
+        crs=gdf.crs,
+        transform=new_transform,
+        nodata=nodata_value,
+        compress=compression,  # Apply compression
+        tiled=True,            # Enable tiling
+        blockxsize=256,
+        blockysize=256
+    ) as dst:
+        dst.write(raster_data, 1)
+
+    print("Conversion complete!")
+
+# --- Example Usage ---
+
+VECTOR_FILE = "/home/dibakar88/N24E90_Training_poly_Brick/N24E90_Training_poly_Brick.shp"
+OUTPUT_RASTER_FILE = "/home/dibakar88/N24E90_Training_poly_Brick/output_raster_compressed_A.tif"
+
+# 💡 TRY A MORE REASONABLE RESOLUTION FIRST!
+
+DESIRED_RESOLUTION = 0.00001
+
+CLASS_ATTRIBUTE_COLUMN = 'id'
+NODATA_VALUE = 0
+
+vectorize_to_raster_by_attribute(
+    VECTOR_FILE,
+    OUTPUT_RASTER_FILE,
+    DESIRED_RESOLUTION,
+    CLASS_ATTRIBUTE_COLUMN,
+    NODATA_VALUE
+)
